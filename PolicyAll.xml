@@ -1,0 +1,231 @@
+<!--
+    - Policies are applied in the order they appear.
+    - Position <base/> inside a section to inherit policies from the outer scope.
+    - Comments within policies are not preserved.
+-->
+<!-- Add policies as children to the <inbound>, <outbound>, <backend>, and <on-error> elements -->
+<policies>
+	<!-- Throttle, authorize, validate, cache, or transform the requests -->
+	<inbound>
+		<set-variable name="startTime" value="@(DateTime.UtcNow.Ticks)" />
+		<set-variable name="encryptedData" value="@{
+            byte[] byteKey = Encoding.UTF8.GetBytes("0123456789abcdef");
+            byte[] byteIV = Encoding.UTF8.GetBytes("abcdef0123456789");
+            byte[] input = Encoding.UTF8.GetBytes("this is the input data");
+            byte[] encryptedData = input.Encrypt("Aes", key:byteKey, iv:byteIV);
+            return Convert.ToBase64String(encryptedData);
+            }" />
+		<set-variable name="zipCookieHeader" value="@{
+            var cookie = context.Request.Headers.GetValueOrDefault("Cookie", "");
+           foreach (var part in cookie.Split(';'))
+           {    
+               var kv = part.Split('=');
+               if (kv.Length == 2 && kv[0].IndexOf("attPersistantLocalization", StringComparison.CurrentCultureIgnoreCase) >= 0)
+               {
+                   return kv[1].Trim();
+               }
+
+               
+           }
+           return "";
+        }" />
+		<set-variable name="CreatedJwt" value="@{
+            var secretKeyData = "12345678901234567890123456789012"; // 32 chars for HS256
+            var jwtHeader = new Dictionary<string, object>()
+            {
+                { "alg", "HS256" },
+                { "typ", "JWT" }
+            };
+            var jwtPayload = new Dictionary<string, object>()
+            {
+                { "sub", "1234567890" },
+                { "name", "John Doe" },
+                { "iat", DateTimeOffset.UtcNow.ToUnixTimeSeconds() }
+            };
+
+            jwtPayload.Add("aesData", EncryptDataAes("AES Sensitive Data Here", "0123456789abcdef", "abcdef0123456789"));
+            jwtPayload.Add("md5Data", CreateMD5Hash("MD5 Sensitive Data Here"));
+            string EncodeBase64Url(string input)
+            {
+                var bytes = System.Text.Encoding.UTF8.GetBytes(input);
+                string encodedData = Convert.ToBase64String(bytes)
+                    .TrimEnd('=')
+                    .Replace('+', '-')
+                    .Replace('/', '_');
+                return encodedData;
+            }
+            
+            string EncryptDataAes(string datatoEncrypt, string aesKey, string aesIV)
+            {
+                byte[] byteKey = Encoding.UTF8.GetBytes(aesKey);
+                byte[] byteIV = Encoding.UTF8.GetBytes(aesIV);
+                byte[] input = Encoding.UTF8.GetBytes(datatoEncrypt);
+                byte[] encryptedData = input.Encrypt("Aes", key:byteKey, iv:byteIV);
+                return Convert.ToBase64String(encryptedData);
+            }
+
+            string CreateMD5Hash(string dataforMD5)
+            {
+                using (MD5 md5 = MD5.Create())
+                {
+                    // Convert input string to byte array
+                    byte[] inputBytes = Encoding.UTF8.GetBytes(dataforMD5);
+
+                    // Compute the hash
+                    byte[] hashBytes = md5.ComputeHash(inputBytes);
+
+                    return Convert.ToBase64String(hashBytes);
+                }
+            }
+
+            string GenerateSignature(string base64Header, string base64Payload, string secretKey)
+            {
+                var cipherText = $"{base64Header}.{base64Payload}";
+                System.Security.Cryptography.HMACSHA256 hmacsha256 = new System.Security.Cryptography.HMACSHA256(Encoding.UTF8.GetBytes(secretKey));
+                var hashResult = hmacsha256.ComputeHash(Encoding.UTF8.GetBytes(cipherText));
+                string signatureData = Convert.ToBase64String(hashResult)
+                    .TrimEnd('=')
+                    .Replace('+', '-')
+                    .Replace('/', '_');
+                return signatureData;
+            }
+
+            string headerJson = Newtonsoft.Json.JsonConvert.SerializeObject(jwtHeader);
+            string payloadJson = Newtonsoft.Json.JsonConvert.SerializeObject(jwtPayload); 
+            string headerBase64Url = EncodeBase64Url(headerJson);
+            string payloadBase64Url = EncodeBase64Url(payloadJson);
+            string signature = GenerateSignature(headerBase64Url, payloadBase64Url, secretKeyData);
+            string signedToken = $"{headerBase64Url}.{payloadBase64Url}.{signature}";
+            return signedToken;
+        }" />
+		<set-variable name="DecodedJwt" value="@{
+            var secretKeyData = "12345678901234567890123456789012"; // 32 chars for HS256
+            var encodedJwt = Convert.ToString(context.Request.Headers.GetValueOrDefault("X-EncodedJWT"));
+            var chunks = encodedJwt.Split('.');
+
+            context.Trace($"encodedJwt: {encodedJwt}", "information");
+
+            string GenerateSignature(string base64Header, string base64Payload, string secretKey)
+            {
+                var cipherText = $"{base64Header}.{base64Payload}";
+                System.Security.Cryptography.HMACSHA256 hmacsha256 = new System.Security.Cryptography.HMACSHA256(Encoding.UTF8.GetBytes(secretKey));
+                var hashResult = hmacsha256.ComputeHash(Encoding.UTF8.GetBytes(cipherText));
+                return Convert.ToBase64String(hashResult)
+                    .TrimEnd('=')
+                    .Replace('+', '-')
+                    .Replace('/', '_');
+            }
+            
+            string Base64UrlDecode(string encodedString)
+            {
+                string incoming = encodedString
+                    .Replace('_', '/').Replace('-', '+');
+                switch (incoming.Length % 4)
+                {
+                    case 2: incoming += "=="; break;
+                    case 3: incoming += "="; break;
+                }
+
+                byte[] bytes = Convert.FromBase64String(incoming);
+                string originalText = Encoding.ASCII.GetString(bytes);
+                return originalText;
+            }
+
+            string DecryptDataAes(string datatoEncrypt, string aesKey, string aesIV)
+            {
+                byte[] byteKey = Encoding.UTF8.GetBytes(aesKey);
+                byte[] byteIV = Encoding.UTF8.GetBytes(aesIV);
+                byte[] input = Convert.FromBase64String(datatoEncrypt);
+                byte[] decryptedData = input.Decrypt("Aes", key:byteKey, iv:byteIV);
+                return Encoding.UTF8.GetString(decryptedData);
+            }
+
+            //get the header
+            var header = Newtonsoft.Json.JsonConvert.DeserializeObject(Base64UrlDecode(chunks[0]));
+            var payload = Newtonsoft.Json.JsonConvert.DeserializeObject(Base64UrlDecode(chunks[1]));
+            //get all the claims back
+            var headers = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, string>>(Base64UrlDecode(chunks[0]));
+            var claims = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, string>>(Base64UrlDecode(chunks[1]));
+            //validate the algorithm    
+
+            foreach (var claim in claims)
+            {
+                context.Trace($"Claim: {claim.Key} Value: {claim.Value}", "warning");
+            }
+
+            foreach (var headerPart in headers)
+            {
+                context.Trace($"Headers: {headerPart.Key} Value: {headerPart.Value}", "warning");
+            }
+             
+            if (!headers.ContainsKey("alg") || headers["alg"] != "HS256")
+            {
+                return "Invalid Algorithm";
+            }
+
+            if (claims.ContainsKey("aesData"))
+            {
+                string decryptedAesData = DecryptDataAes(claims["aesData"], "0123456789abcdef", "abcdef0123456789");
+                context.Trace($"Claim: aesData DecryptedValue: {decryptedAesData}", "warning");
+            }
+                      
+            //we only need to generate the signature again and match with the signature in the jwt to verify it.
+            var signature = GenerateSignature(chunks[0], chunks[1], secretKeyData);
+            if (signature != chunks[2])
+            {
+                return "Signature Mismatch";
+            }
+            
+            return "Signature Match";
+        }" />
+		<choose>
+			<when condition="@(Convert.ToString(context.Variables.GetValueOrDefault("zipCookieHeader")).Length > 0 )">
+				<set-header name="idpctx-locale-zip" exists-action="override">
+					<value>@(Convert.ToString(context.Variables.GetValueOrDefault("zipCookieHeader")))</value>
+				</set-header>
+			</when>
+		</choose>
+		<choose>
+			<when condition="@(context.Request.Headers.ContainsKey("Kill-Bad-Headers") && context.Request.Headers.GetValueOrDefault("Kill-Bad-Headers", "").IndexOf("true", StringComparison.CurrentCultureIgnoreCase) >= 0 )">
+				<set-header name="Bad-Header01" exists-action="delete" />
+				<set-header name="Bad-Header02" exists-action="delete" />
+				<set-header name="Bad-Header03" exists-action="delete" />
+			</when>
+		</choose>
+		<set-header name="X-Jwt-Created" exists-action="override">
+			<value>@(Convert.ToString(context.Variables.GetValueOrDefault("CreatedJwt")))</value>
+		</set-header>
+		<set-header name="X-Jwt-Verified" exists-action="override">
+			<value>@(Convert.ToString(context.Variables.GetValueOrDefault("DecodedJwt")))</value>
+		</set-header>
+		<set-header name="X-Echo-GUID" exists-action="override">
+			<value>@(Guid.NewGuid().ToString())</value>
+		</set-header>
+		<set-variable name="IncomingReqAttributes" value="@{return string.Format("X-Forwarded-For:{0},idp-trace-id:{1},idpctx-session-id:{2},HTTP-METHOD:{3}",context.Request.IpAddress, context.Request.Headers.GetValueOrDefault("idp-trace-id",""), context.Request.Headers.GetValueOrDefault("idpctx-session-id",""), context.Request.Method);}" />
+		<trace source="IncominglogAttributes" severity="verbose">
+			<message>@(Convert.ToString(context.Variables["IncomingReqAttributes"]))</message>
+			<metadata name="logging" value="request" />
+		</trace>
+		<set-header name="CustomHeader" exists-action="override">
+			<value>{{HeaderFlag}}</value>
+		</set-header>
+		<base />
+	</inbound>
+	<!-- Control if and how the requests are forwarded to services  -->
+	<backend>
+		<base />
+	</backend>
+	<!-- Customize the responses -->
+	<outbound>
+		<set-variable name="endTime" value="@(DateTime.UtcNow.Ticks)" />
+		<set-variable name="latencyMs" value="@(Convert.ToInt32(((context.Variables["endTime"] as long?) - (context.Variables["startTime"] as long?)) / 10000))" />
+		<set-header name="X-Echo-Latency-Ms" exists-action="override">
+			<value>@(Convert.ToString(context.Variables["latencyMs"]))</value>
+		</set-header>
+		<base />
+	</outbound>
+	<!-- Handle exceptions and customize error responses  -->
+	<on-error>
+		<base />
+	</on-error>
+</policies>

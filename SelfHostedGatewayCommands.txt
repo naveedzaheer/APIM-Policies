@@ -1,0 +1,9 @@
+helm install <self-hosted-gw-name> \
+    --set replicaCount=1 \
+   --set gateway.name='self-hosted-gw-name' \
+   --set gateway.configuration.uri='<apim-name>>.configuration.azure-api.net' \
+   --set gateway.auth.type='azureAdApp' \
+   --set gateway.auth.azureAd.app.id='XXXXXXXXXXXXXXXXXXXXXXXXXXX' \
+   --set gateway.auth.azureAd.tenant.id='XXXXXXXXXXXXXXXXXXXXXXXXX' \
+   --set gateway.auth.azureAd.app.secret='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX' \
+   azure-apim-gateway/azure-api-management-gateway
